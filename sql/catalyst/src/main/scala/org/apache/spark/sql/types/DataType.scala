@@ -51,7 +51,9 @@ abstract class DataType extends AbstractDataType {
   def defaultSize: Int
 
   /** Name of the type used in JSON serialization. */
-  def typeName: String = this.getClass.getSimpleName.stripSuffix("$").dropRight(4).toLowerCase
+  def typeName: String = {
+    this.getClass.getSimpleName.stripSuffix("$").stripSuffix("Type").stripSuffix("UDT").toLowerCase
+  }
 
   private[sql] def jsonValue: JValue = typeName
 
@@ -76,6 +78,11 @@ abstract class DataType extends AbstractDataType {
    * (`StructField.nullable`, `ArrayType.containsNull`, and `MapType.valueContainsNull`).
    */
   private[spark] def asNullable: DataType
+
+  /**
+   * Returns true if any `DataType` of this DataType tree satisfies the given function `f`.
+   */
+  private[spark] def existsRecursively(f: (DataType) => Boolean): Boolean = f(this)
 
   override private[sql] def defaultConcreteType: DataType = this
 
@@ -142,12 +149,21 @@ object DataType {
     ("type", JString("struct"))) =>
       StructType(fields.map(parseStructField))
 
+    // Scala/Java UDT
     case JSortedObject(
     ("class", JString(udtClass)),
     ("pyClass", _),
     ("sqlType", _),
     ("type", JString("udt"))) =>
       Utils.classForName(udtClass).newInstance().asInstanceOf[UserDefinedType[_]]
+
+    // Python UDT
+    case JSortedObject(
+    ("pyClass", JString(pyClass)),
+    ("serializedClass", JString(serialized)),
+    ("sqlType", v: JValue),
+    ("type", JString("udt"))) =>
+        new PythonUserDefinedType(parseDataType(v), pyClass, serialized)
   }
 
   private def parseStructField(json: JValue): StructField = json match {

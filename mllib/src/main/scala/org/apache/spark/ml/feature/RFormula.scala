@@ -17,28 +17,23 @@
 
 package org.apache.spark.ml.feature
 
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
-import scala.util.parsing.combinator.RegexParsers
 
 import org.apache.spark.annotation.Experimental
-import org.apache.spark.ml.{Estimator, Model, Transformer, Pipeline, PipelineModel, PipelineStage}
+import org.apache.spark.ml.attribute.AttributeGroup
+import org.apache.spark.ml.{Estimator, Model, Pipeline, PipelineModel, PipelineStage, Transformer}
 import org.apache.spark.ml.param.{Param, ParamMap}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasLabelCol}
 import org.apache.spark.ml.util.Identifiable
 import org.apache.spark.mllib.linalg.VectorUDT
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 
 /**
  * Base trait for [[RFormula]] and [[RFormulaModel]].
  */
 private[feature] trait RFormulaBase extends HasFeaturesCol with HasLabelCol {
-  /** @group getParam */
-  def setFeaturesCol(value: String): this.type = set(featuresCol, value)
-
-  /** @group getParam */
-  def setLabelCol(value: String): this.type = set(labelCol, value)
 
   protected def hasLabelCol(schema: StructType): Boolean = {
     schema.map(_.name).contains($(labelCol))
@@ -48,8 +43,8 @@ private[feature] trait RFormulaBase extends HasFeaturesCol with HasLabelCol {
 /**
  * :: Experimental ::
  * Implements the transforms required for fitting a dataset against an R model formula. Currently
- * we support a limited subset of the R operators, including '~' and '+'. Also see the R formula
- * docs here: http://stat.ethz.ch/R-manual/R-patched/library/stats/html/formula.html
+ * we support a limited subset of the R operators, including '~', '.', ':', '+', and '-'. Also see
+ * the R formula docs here: http://stat.ethz.ch/R-manual/R-patched/library/stats/html/formula.html
  */
 @Experimental
 class RFormula(override val uid: String) extends Estimator[RFormulaModel] with RFormulaBase {
@@ -62,48 +57,83 @@ class RFormula(override val uid: String) extends Estimator[RFormulaModel] with R
    */
   val formula: Param[String] = new Param(this, "formula", "R model formula")
 
-  private var parsedFormula: Option[ParsedRFormula] = None
-
   /**
    * Sets the formula to use for this transformer. Must be called before use.
    * @group setParam
    * @param value an R formula in string form (e.g. "y ~ x + z")
    */
-  def setFormula(value: String): this.type = {
-    parsedFormula = Some(RFormulaParser.parse(value))
-    set(formula, value)
-    this
-  }
+  def setFormula(value: String): this.type = set(formula, value)
 
   /** @group getParam */
   def getFormula: String = $(formula)
 
+  /** @group setParam */
+  def setFeaturesCol(value: String): this.type = set(featuresCol, value)
+
+  /** @group setParam */
+  def setLabelCol(value: String): this.type = set(labelCol, value)
+
+  /** Whether the formula specifies fitting an intercept. */
+  private[ml] def hasIntercept: Boolean = {
+    require(isDefined(formula), "Formula must be defined first.")
+    RFormulaParser.parse($(formula)).hasIntercept
+  }
+
   override def fit(dataset: DataFrame): RFormulaModel = {
-    require(parsedFormula.isDefined, "Must call setFormula() first.")
-    // StringType terms and terms representing interactions need to be encoded before assembly.
-    // TODO(ekl) add support for feature interactions
-    var encoderStages = ArrayBuffer[PipelineStage]()
-    var tempColumns = ArrayBuffer[String]()
-    val encodedTerms = parsedFormula.get.terms.map { term =>
+    require(isDefined(formula), "Formula must be defined first.")
+    val parsedFormula = RFormulaParser.parse($(formula))
+    val resolvedFormula = parsedFormula.resolve(dataset.schema)
+    val encoderStages = ArrayBuffer[PipelineStage]()
+
+    val prefixesToRewrite = mutable.Map[String, String]()
+    val tempColumns = ArrayBuffer[String]()
+    def tmpColumn(category: String): String = {
+      val col = Identifiable.randomUID(category)
+      tempColumns += col
+      col
+    }
+
+    // First we index each string column referenced by the input terms.
+    val indexed: Map[String, String] = resolvedFormula.terms.flatten.distinct.map { term =>
       dataset.schema(term) match {
         case column if column.dataType == StringType =>
-          val indexCol = term + "_idx_" + uid
-          val encodedCol = term + "_onehot_" + uid
-          encoderStages += new StringIndexer().setInputCol(term).setOutputCol(indexCol)
-          encoderStages += new OneHotEncoder().setInputCol(indexCol).setOutputCol(encodedCol)
-          tempColumns += indexCol
-          tempColumns += encodedCol
-          encodedCol
+          val indexCol = tmpColumn("stridx")
+          encoderStages += new StringIndexer()
+            .setInputCol(term)
+            .setOutputCol(indexCol)
+          (term, indexCol)
         case _ =>
-          term
+          (term, term)
       }
+    }.toMap
+
+    // Then we handle one-hot encoding and interactions between terms.
+    val encodedTerms = resolvedFormula.terms.map {
+      case Seq(term) if dataset.schema(term).dataType == StringType =>
+        val encodedCol = tmpColumn("onehot")
+        encoderStages += new OneHotEncoder()
+          .setInputCol(indexed(term))
+          .setOutputCol(encodedCol)
+        prefixesToRewrite(encodedCol + "_") = term + "_"
+        encodedCol
+      case Seq(term) =>
+        term
+      case terms =>
+        val interactionCol = tmpColumn("interaction")
+        encoderStages += new Interaction()
+          .setInputCols(terms.map(indexed).toArray)
+          .setOutputCol(interactionCol)
+        prefixesToRewrite(interactionCol + "_") = ""
+        interactionCol
     }
+
     encoderStages += new VectorAssembler(uid)
       .setInputCols(encodedTerms.toArray)
       .setOutputCol($(featuresCol))
+    encoderStages += new VectorAttributeRewriter($(featuresCol), prefixesToRewrite.toMap)
     encoderStages += new ColumnPruner(tempColumns.toSet)
     val pipelineModel = new Pipeline(uid).setStages(encoderStages.toArray).fit(dataset)
-    copyValues(new RFormulaModel(uid, parsedFormula.get, pipelineModel).setParent(this))
+    copyValues(new RFormulaModel(uid, resolvedFormula, pipelineModel).setParent(this))
   }
 
   // optimistic schema; does not contain any ML attributes
@@ -118,19 +148,19 @@ class RFormula(override val uid: String) extends Estimator[RFormulaModel] with R
 
   override def copy(extra: ParamMap): RFormula = defaultCopy(extra)
 
-  override def toString: String = s"RFormula(${get(formula)})"
+  override def toString: String = s"RFormula(${get(formula)}) (uid=$uid)"
 }
 
 /**
  * :: Experimental ::
  * A fitted RFormula. Fitting is required to determine the factor levels of formula terms.
- * @param parsedFormula a pre-parsed R formula.
+ * @param resolvedFormula the fitted R formula.
  * @param pipelineModel the fitted feature model, including factor to index mappings.
  */
 @Experimental
 class RFormulaModel private[feature](
     override val uid: String,
-    parsedFormula: ParsedRFormula,
+    resolvedFormula: ResolvedRFormula,
     pipelineModel: PipelineModel)
   extends Model[RFormulaModel] with RFormulaBase {
 
@@ -144,8 +174,8 @@ class RFormulaModel private[feature](
     val withFeatures = pipelineModel.transformSchema(schema)
     if (hasLabelCol(schema)) {
       withFeatures
-    } else if (schema.exists(_.name == parsedFormula.label)) {
-      val nullable = schema(parsedFormula.label).dataType match {
+    } else if (schema.exists(_.name == resolvedFormula.label)) {
+      val nullable = schema(resolvedFormula.label).dataType match {
         case _: NumericType | BooleanType => false
         case _ => true
       }
@@ -158,12 +188,12 @@ class RFormulaModel private[feature](
   }
 
   override def copy(extra: ParamMap): RFormulaModel = copyValues(
-    new RFormulaModel(uid, parsedFormula, pipelineModel))
+    new RFormulaModel(uid, resolvedFormula, pipelineModel))
 
-  override def toString: String = s"RFormulaModel(${parsedFormula})"
+  override def toString: String = s"RFormulaModel(${resolvedFormula}) (uid=$uid)"
 
   private def transformLabel(dataset: DataFrame): DataFrame = {
-    val labelName = parsedFormula.label
+    val labelName = resolvedFormula.label
     if (hasLabelCol(dataset.schema)) {
       dataset
     } else if (dataset.schema.exists(_.name == labelName)) {
@@ -209,24 +239,51 @@ private class ColumnPruner(columnsToPrune: Set[String]) extends Transformer {
 }
 
 /**
- * Represents a parsed R formula.
+ * Utility transformer that rewrites Vector attribute names via prefix replacement. For example,
+ * it can rewrite attribute names starting with 'foo_' to start with 'bar_' instead.
+ *
+ * @param vectorCol name of the vector column to rewrite.
+ * @param prefixesToRewrite the map of string prefixes to their replacement values. Each attribute
+ *                          name defined in vectorCol will be checked against the keys of this
+ *                          map. When a key prefixes a name, the matching prefix will be replaced
+ *                          by the value in the map.
  */
-private[ml] case class ParsedRFormula(label: String, terms: Seq[String])
+private class VectorAttributeRewriter(
+    vectorCol: String,
+    prefixesToRewrite: Map[String, String])
+  extends Transformer {
 
-/**
- * Limited implementation of R formula parsing. Currently supports: '~', '+'.
- */
-private[ml] object RFormulaParser extends RegexParsers {
-  def term: Parser[String] = "([a-zA-Z]|\\.[a-zA-Z_])[a-zA-Z0-9._]*".r
+  override val uid = Identifiable.randomUID("vectorAttrRewriter")
 
-  def expr: Parser[List[String]] = term ~ rep("+" ~> term) ^^ { case a ~ list => a :: list }
-
-  def formula: Parser[ParsedRFormula] =
-    (term ~ "~" ~ expr) ^^ { case r ~ "~" ~ t => ParsedRFormula(r, t.distinct) }
-
-  def parse(value: String): ParsedRFormula = parseAll(formula, value) match {
-    case Success(result, _) => result
-    case failure: NoSuccess => throw new IllegalArgumentException(
-      "Could not parse formula: " + value)
+  override def transform(dataset: DataFrame): DataFrame = {
+    val metadata = {
+      val group = AttributeGroup.fromStructField(dataset.schema(vectorCol))
+      val attrs = group.attributes.get.map { attr =>
+        if (attr.name.isDefined) {
+          val name = attr.name.get
+          val replacement = prefixesToRewrite.filter { case (k, _) => name.startsWith(k) }
+          if (replacement.nonEmpty) {
+            val (k, v) = replacement.headOption.get
+            attr.withName(v + name.stripPrefix(k))
+          } else {
+            attr
+          }
+        } else {
+          attr
+        }
+      }
+      new AttributeGroup(vectorCol, attrs).toMetadata()
+    }
+    val otherCols = dataset.columns.filter(_ != vectorCol).map(dataset.col)
+    val rewrittenCol = dataset.col(vectorCol).as(vectorCol, metadata)
+    dataset.select((otherCols :+ rewrittenCol): _*)
   }
+
+  override def transformSchema(schema: StructType): StructType = {
+    StructType(
+      schema.fields.filter(_.name != vectorCol) ++
+      schema.fields.filter(_.name == vectorCol))
+  }
+
+  override def copy(extra: ParamMap): VectorAttributeRewriter = defaultCopy(extra)
 }

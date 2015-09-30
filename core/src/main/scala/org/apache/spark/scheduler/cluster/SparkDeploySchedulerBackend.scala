@@ -23,7 +23,7 @@ import org.apache.spark.rpc.RpcAddress
 import org.apache.spark.{Logging, SparkConf, SparkContext, SparkEnv}
 import org.apache.spark.deploy.{ApplicationDescription, Command}
 import org.apache.spark.deploy.client.{AppClient, AppClientListener}
-import org.apache.spark.scheduler.{ExecutorExited, ExecutorLossReason, SlaveLost, TaskSchedulerImpl}
+import org.apache.spark.scheduler._
 import org.apache.spark.util.Utils
 
 private[spark] class SparkDeploySchedulerBackend(
@@ -135,11 +135,11 @@ private[spark] class SparkDeploySchedulerBackend(
 
   override def executorRemoved(fullId: String, message: String, exitStatus: Option[Int]) {
     val reason: ExecutorLossReason = exitStatus match {
-      case Some(code) => ExecutorExited(code)
+      case Some(code) => ExecutorExited(code, isNormalExit = true, message)
       case None => SlaveLost(message)
     }
     logInfo("Executor %s removed: %s".format(fullId, message))
-    removeExecutor(fullId.split("/")(1), reason.toString)
+    removeExecutor(fullId.split("/")(1), reason)
   }
 
   override def sufficientResourcesRegistered(): Boolean = {
@@ -151,6 +151,34 @@ private[spark] class SparkDeploySchedulerBackend(
       logWarning("Application ID is not initialized yet.")
       super.applicationId
     }
+
+  /**
+   * Request executors from the Master by specifying the total number desired,
+   * including existing pending and running executors.
+   *
+   * @return whether the request is acknowledged.
+   */
+  protected override def doRequestTotalExecutors(requestedTotal: Int): Boolean = {
+    Option(client) match {
+      case Some(c) => c.requestTotalExecutors(requestedTotal)
+      case None =>
+        logWarning("Attempted to request executors before driver fully initialized.")
+        false
+    }
+  }
+
+  /**
+   * Kill the given list of executors through the Master.
+   * @return whether the kill request is acknowledged.
+   */
+  protected override def doKillExecutors(executorIds: Seq[String]): Boolean = {
+    Option(client) match {
+      case Some(c) => c.killExecutors(executorIds)
+      case None =>
+        logWarning("Attempted to kill executors before driver fully initialized.")
+        false
+    }
+  }
 
   private def waitForRegistration() = {
     registrationBarrier.acquire()

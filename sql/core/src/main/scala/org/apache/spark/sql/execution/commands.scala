@@ -69,6 +69,8 @@ private[sql] case class ExecutedCommand(cmd: RunnableCommand) extends SparkPlan 
     val converted = sideEffectResult.map(convert(_).asInstanceOf[InternalRow])
     sqlContext.sparkContext.parallelize(converted, 1)
   }
+
+  override def argString: String = cmd.toString
 }
 
 /**
@@ -100,6 +102,15 @@ case class SetCommand(kv: Option[(String, Option[String])]) extends RunnableComm
           sqlContext.setConf(SQLConf.SHUFFLE_PARTITIONS.key, value)
           Seq(Row(SQLConf.SHUFFLE_PARTITIONS.key, value))
         }
+      }
+      (keyValueOutput, runFunc)
+
+    case Some((SQLConf.Deprecated.EXTERNAL_SORT, Some(value))) =>
+      val runFunc = (sqlContext: SQLContext) => {
+        logWarning(
+          s"Property ${SQLConf.Deprecated.EXTERNAL_SORT} is deprecated and will be ignored. " +
+            s"External sort will continue to be used.")
+        Seq(Row(SQLConf.Deprecated.EXTERNAL_SORT, "true"))
       }
       (keyValueOutput, runFunc)
 

@@ -95,7 +95,7 @@ private[sql] object TypeCollection {
    * Types that include numeric types and interval type. They are only used in unary_minus,
    * unary_positive, add and subtract operations.
    */
-  val NumericAndInterval = TypeCollection(NumericType, IntervalType)
+  val NumericAndInterval = TypeCollection(NumericType, CalendarIntervalType)
 
   def apply(types: AbstractDataType*): TypeCollection = new TypeCollection(types)
 
@@ -126,7 +126,7 @@ protected[sql] object AnyDataType extends AbstractDataType {
  */
 protected[sql] abstract class AtomicType extends DataType {
   private[sql] type InternalType
-  @transient private[sql] val tag: TypeTag[InternalType]
+  private[sql] val tag: TypeTag[InternalType]
   private[sql] val ordering: Ordering[InternalType]
 
   @transient private[sql] val classTag = ScalaReflectionLock.synchronized {
