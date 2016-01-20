@@ -237,8 +237,8 @@ public class JavaDataFrameSuite {
     DataFrame crosstab = df.stat().crosstab("a", "b");
     String[] columnNames = crosstab.schema().fieldNames();
     Assert.assertEquals("a_b", columnNames[0]);
-    Assert.assertEquals("1", columnNames[1]);
-    Assert.assertEquals("2", columnNames[2]);
+    Assert.assertEquals("2", columnNames[1]);
+    Assert.assertEquals("1", columnNames[2]);
     Row[] rows = crosstab.collect();
     Arrays.sort(rows, crosstabRowComparator);
     Integer count = 1;
@@ -281,5 +281,44 @@ public class JavaDataFrameSuite {
     Assert.assertTrue(0 <= actual[0].getLong(1) && actual[0].getLong(1) <= 8);
     Assert.assertEquals(1, actual[1].getLong(0));
     Assert.assertTrue(2 <= actual[1].getLong(1) && actual[1].getLong(1) <= 13);
+  }
+
+  @Test
+  public void pivot() {
+    DataFrame df = context.table("courseSales");
+    Row[] actual = df.groupBy("year")
+      .pivot("course", Arrays.<Object>asList("dotNET", "Java"))
+      .agg(sum("earnings")).orderBy("year").collect();
+
+    Assert.assertEquals(2012, actual[0].getInt(0));
+    Assert.assertEquals(15000.0, actual[0].getDouble(1), 0.01);
+    Assert.assertEquals(20000.0, actual[0].getDouble(2), 0.01);
+
+    Assert.assertEquals(2013, actual[1].getInt(0));
+    Assert.assertEquals(48000.0, actual[1].getDouble(1), 0.01);
+    Assert.assertEquals(30000.0, actual[1].getDouble(2), 0.01);
+  }
+
+  public void testGenericLoad() {
+    DataFrame df1 = context.read().format("text").load(
+      Thread.currentThread().getContextClassLoader().getResource("text-suite.txt").toString());
+    Assert.assertEquals(4L, df1.count());
+
+    DataFrame df2 = context.read().format("text").load(
+      Thread.currentThread().getContextClassLoader().getResource("text-suite.txt").toString(),
+      Thread.currentThread().getContextClassLoader().getResource("text-suite2.txt").toString());
+    Assert.assertEquals(5L, df2.count());
+  }
+
+  @Test
+  public void testTextLoad() {
+    DataFrame df1 = context.read().text(
+      Thread.currentThread().getContextClassLoader().getResource("text-suite.txt").toString());
+    Assert.assertEquals(4L, df1.count());
+
+    DataFrame df2 = context.read().text(
+      Thread.currentThread().getContextClassLoader().getResource("text-suite.txt").toString(),
+      Thread.currentThread().getContextClassLoader().getResource("text-suite2.txt").toString());
+    Assert.assertEquals(5L, df2.count());
   }
 }

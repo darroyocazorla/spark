@@ -19,9 +19,6 @@ package org.apache.spark.util
 
 import java.util.Properties
 
-import org.apache.spark.scheduler.cluster.ExecutorInfo
-import org.apache.spark.shuffle.MetadataFetchFailedException
-
 import scala.collection.Map
 
 import org.json4s.jackson.JsonMethods._
@@ -30,6 +27,8 @@ import org.apache.spark._
 import org.apache.spark.executor._
 import org.apache.spark.rdd.RDDOperationScope
 import org.apache.spark.scheduler._
+import org.apache.spark.scheduler.cluster.ExecutorInfo
+import org.apache.spark.shuffle.MetadataFetchFailedException
 import org.apache.spark.storage._
 
 class JsonProtocolSuite extends SparkFunSuite {
@@ -111,7 +110,6 @@ class JsonProtocolSuite extends SparkFunSuite {
   test("Dependent Classes") {
     val logUrlMap = Map("stderr" -> "mystderr", "stdout" -> "mystdout").toMap
     testRDDInfo(makeRddInfo(2, 3, 4, 5L, 6L))
-    testCallsite(CallSite("happy", "birthday"))
     testStageInfo(makeStageInfo(10, 20, 30, 40L, 50L))
     testTaskInfo(makeTaskInfo(999L, 888, 55, 777L, false))
     testTaskMetrics(makeTaskMetrics(
@@ -229,7 +227,7 @@ class JsonProtocolSuite extends SparkFunSuite {
                          .removeField { case (field, _) => field == "Shuffle Records Written" }
     val newMetrics = JsonProtocol.taskMetricsFromJson(oldJson)
     assert(newMetrics.shuffleReadMetrics.get.recordsRead == 0)
-    assert(newMetrics.shuffleWriteMetrics.get.shuffleRecordsWritten == 0)
+    assert(newMetrics.shuffleWriteMetrics.get.recordsWritten == 0)
   }
 
   test("OutputMetrics backward compatibility") {
@@ -343,13 +341,13 @@ class JsonProtocolSuite extends SparkFunSuite {
     // "Scope" and "Parent IDs" were introduced in Spark 1.4.0
     // "Callsite" was introduced in Spark 1.6.0
     val rddInfo = new RDDInfo(1, "one", 100, StorageLevel.NONE, Seq(1, 6, 8),
-      CallSite("short", "long"), Some(new RDDOperationScope("fable")))
+      "callsite", Some(new RDDOperationScope("fable")))
     val oldRddInfoJson = JsonProtocol.rddInfoToJson(rddInfo)
       .removeField({ _._1 == "Parent IDs"})
       .removeField({ _._1 == "Scope"})
       .removeField({ _._1 == "Callsite"})
     val expectedRddInfo = new RDDInfo(
-      1, "one", 100, StorageLevel.NONE, Seq.empty, CallSite.empty, scope = None)
+      1, "one", 100, StorageLevel.NONE, Seq.empty, "", scope = None)
     assertEquals(expectedRddInfo, JsonProtocol.rddInfoFromJson(oldRddInfoJson))
   }
 
@@ -395,11 +393,6 @@ class JsonProtocolSuite extends SparkFunSuite {
   private def testRDDInfo(info: RDDInfo) {
     val newInfo = JsonProtocol.rddInfoFromJson(JsonProtocol.rddInfoToJson(info))
     assertEquals(info, newInfo)
-  }
-
-  private def testCallsite(callsite: CallSite): Unit = {
-    val newCallsite = JsonProtocol.callsiteFromJson(JsonProtocol.callsiteToJson(callsite))
-    assert(callsite === newCallsite)
   }
 
   private def testStageInfo(info: StageInfo) {
@@ -564,7 +557,7 @@ class JsonProtocolSuite extends SparkFunSuite {
       metrics1.shuffleWriteMetrics, metrics2.shuffleWriteMetrics, assertShuffleWriteEquals)
     assertOptionEquals(
       metrics1.inputMetrics, metrics2.inputMetrics, assertInputMetricsEquals)
-    assertOptionEquals(metrics1.updatedBlocks, metrics2.updatedBlocks, assertBlocksEquals)
+    assertBlocksEquals(metrics1.updatedBlockStatuses, metrics2.updatedBlockStatuses)
   }
 
   private def assertEquals(metrics1: ShuffleReadMetrics, metrics2: ShuffleReadMetrics) {
@@ -575,8 +568,8 @@ class JsonProtocolSuite extends SparkFunSuite {
   }
 
   private def assertEquals(metrics1: ShuffleWriteMetrics, metrics2: ShuffleWriteMetrics) {
-    assert(metrics1.shuffleBytesWritten === metrics2.shuffleBytesWritten)
-    assert(metrics1.shuffleWriteTime === metrics2.shuffleWriteTime)
+    assert(metrics1.bytesWritten === metrics2.bytesWritten)
+    assert(metrics1.writeTime === metrics2.writeTime)
   }
 
   private def assertEquals(metrics1: InputMetrics, metrics2: InputMetrics) {
@@ -726,8 +719,7 @@ class JsonProtocolSuite extends SparkFunSuite {
   }
 
   private def makeRddInfo(a: Int, b: Int, c: Int, d: Long, e: Long) = {
-    val r = new RDDInfo(a, "mayor", b, StorageLevel.MEMORY_AND_DISK,
-      Seq(1, 4, 7), CallSite(a.toString, b.toString))
+    val r = new RDDInfo(a, "mayor", b, StorageLevel.MEMORY_AND_DISK, Seq(1, 4, 7), a.toString)
     r.numCachedPartitions = c
     r.memSize = d
     r.diskSize = e
@@ -781,35 +773,32 @@ class JsonProtocolSuite extends SparkFunSuite {
     t.incMemoryBytesSpilled(a + c)
 
     if (hasHadoopInput) {
-      val inputMetrics = new InputMetrics(DataReadMethod.Hadoop)
+      val inputMetrics = t.registerInputMetrics(DataReadMethod.Hadoop)
       inputMetrics.incBytesRead(d + e + f)
       inputMetrics.incRecordsRead(if (hasRecords) (d + e + f) / 100 else -1)
-      t.setInputMetrics(Some(inputMetrics))
     } else {
-      val sr = new ShuffleReadMetrics
+      val sr = t.registerTempShuffleReadMetrics()
       sr.incRemoteBytesRead(b + d)
       sr.incLocalBlocksFetched(e)
       sr.incFetchWaitTime(a + d)
       sr.incRemoteBlocksFetched(f)
       sr.incRecordsRead(if (hasRecords) (b + d) / 100 else -1)
       sr.incLocalBytesRead(a + f)
-      t.setShuffleReadMetrics(Some(sr))
+      t.mergeShuffleReadMetrics()
     }
     if (hasOutput) {
-      val outputMetrics = new OutputMetrics(DataWriteMethod.Hadoop)
+      val outputMetrics = t.registerOutputMetrics(DataWriteMethod.Hadoop)
       outputMetrics.setBytesWritten(a + b + c)
       outputMetrics.setRecordsWritten(if (hasRecords) (a + b + c)/100 else -1)
-      t.outputMetrics = Some(outputMetrics)
     } else {
-      val sw = new ShuffleWriteMetrics
-      sw.incShuffleBytesWritten(a + b + c)
-      sw.incShuffleWriteTime(b + c + d)
-      sw.setShuffleRecordsWritten(if (hasRecords) (a + b + c) / 100 else -1)
-      t.shuffleWriteMetrics = Some(sw)
+      val sw = t.registerShuffleWriteMetrics()
+      sw.incBytesWritten(a + b + c)
+      sw.incWriteTime(b + c + d)
+      sw.setRecordsWritten(if (hasRecords) (a + b + c) / 100 else -1)
     }
     // Make at most 6 blocks
-    t.updatedBlocks = Some((1 to (e % 5 + 1)).map { i =>
-      (RDDBlockId(e % i, f % i), BlockStatus(StorageLevel.MEMORY_AND_DISK_SER_2, a % i, b % i, c%i))
+    t.setUpdatedBlockStatuses((1 to (e % 5 + 1)).map { i =>
+      (RDDBlockId(e % i, f % i), BlockStatus(StorageLevel.MEMORY_AND_DISK_SER_2, a % i, b % i))
     }.toSeq)
     t
   }
@@ -870,19 +859,17 @@ class JsonProtocolSuite extends SparkFunSuite {
       |      {
       |        "RDD ID": 101,
       |        "Name": "mayor",
-      |        "Callsite": {"Short Form": "101", "Long Form": "201"},
+      |        "Callsite": "101",
       |        "Parent IDs": [1, 4, 7],
       |        "Storage Level": {
       |          "Use Disk": true,
       |          "Use Memory": true,
-      |          "Use ExternalBlockStore": false,
       |          "Deserialized": true,
       |          "Replication": 1
       |        },
       |        "Number of Partitions": 201,
       |        "Number of Cached Partitions": 301,
       |        "Memory Size": 401,
-      |        "ExternalBlockStore Size": 0,
       |        "Disk Size": 501
       |      }
       |    ],
@@ -1071,12 +1058,10 @@ class JsonProtocolSuite extends SparkFunSuite {
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": false,
       |            "Replication": 2
       |          },
       |          "Memory Size": 0,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 0
       |        }
       |      }
@@ -1157,12 +1142,10 @@ class JsonProtocolSuite extends SparkFunSuite {
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": false,
       |            "Replication": 2
       |          },
       |          "Memory Size": 0,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 0
       |        }
       |      }
@@ -1243,12 +1226,10 @@ class JsonProtocolSuite extends SparkFunSuite {
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": false,
       |            "Replication": 2
       |          },
       |          "Memory Size": 0,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 0
       |        }
       |      }
@@ -1273,19 +1254,17 @@ class JsonProtocolSuite extends SparkFunSuite {
       |        {
       |          "RDD ID": 1,
       |          "Name": "mayor",
-      |          "Callsite": {"Short Form": "1", "Long Form": "200"},
+      |          "Callsite": "1",
       |          "Parent IDs": [1, 4, 7],
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": true,
       |            "Replication": 1
       |          },
       |          "Number of Partitions": 200,
       |          "Number of Cached Partitions": 300,
       |          "Memory Size": 400,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 500
       |        }
       |      ],
@@ -1317,37 +1296,33 @@ class JsonProtocolSuite extends SparkFunSuite {
       |        {
       |          "RDD ID": 2,
       |          "Name": "mayor",
-      |          "Callsite": {"Short Form": "2", "Long Form": "400"},
+      |          "Callsite": "2",
       |          "Parent IDs": [1, 4, 7],
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": true,
       |            "Replication": 1
       |          },
       |          "Number of Partitions": 400,
       |          "Number of Cached Partitions": 600,
       |          "Memory Size": 800,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 1000
       |        },
       |        {
       |          "RDD ID": 3,
       |          "Name": "mayor",
-      |          "Callsite": {"Short Form": "3", "Long Form": "401"},
+      |          "Callsite": "3",
       |          "Parent IDs": [1, 4, 7],
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": true,
       |            "Replication": 1
       |          },
       |          "Number of Partitions": 401,
       |          "Number of Cached Partitions": 601,
       |          "Memory Size": 801,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 1001
       |        }
       |      ],
@@ -1379,55 +1354,49 @@ class JsonProtocolSuite extends SparkFunSuite {
       |        {
       |          "RDD ID": 3,
       |          "Name": "mayor",
-      |          "Callsite": {"Short Form": "3", "Long Form": "600"},
+      |          "Callsite": "3",
       |          "Parent IDs": [1, 4, 7],
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": true,
       |            "Replication": 1
       |          },
       |          "Number of Partitions": 600,
       |          "Number of Cached Partitions": 900,
       |          "Memory Size": 1200,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 1500
       |        },
       |        {
       |          "RDD ID": 4,
       |          "Name": "mayor",
-      |          "Callsite": {"Short Form": "4", "Long Form": "601"},
+      |          "Callsite": "4",
       |          "Parent IDs": [1, 4, 7],
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": true,
       |            "Replication": 1
       |          },
       |          "Number of Partitions": 601,
       |          "Number of Cached Partitions": 901,
       |          "Memory Size": 1201,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 1501
       |        },
       |        {
       |          "RDD ID": 5,
       |          "Name": "mayor",
-      |          "Callsite": {"Short Form": "5", "Long Form": "602"},
+      |          "Callsite": "5",
       |          "Parent IDs": [1, 4, 7],
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": true,
       |            "Replication": 1
       |          },
       |          "Number of Partitions": 602,
       |          "Number of Cached Partitions": 902,
       |          "Memory Size": 1202,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 1502
       |        }
       |      ],
@@ -1459,73 +1428,65 @@ class JsonProtocolSuite extends SparkFunSuite {
       |        {
       |          "RDD ID": 4,
       |          "Name": "mayor",
-      |          "Callsite": {"Short Form": "4", "Long Form": "800"},
+      |          "Callsite": "4",
       |          "Parent IDs": [1, 4, 7],
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": true,
       |            "Replication": 1
       |          },
       |          "Number of Partitions": 800,
       |          "Number of Cached Partitions": 1200,
       |          "Memory Size": 1600,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 2000
       |        },
       |        {
       |          "RDD ID": 5,
       |          "Name": "mayor",
-      |          "Callsite": {"Short Form": "5", "Long Form": "801"},
+      |          "Callsite": "5",
       |          "Parent IDs": [1, 4, 7],
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": true,
       |            "Replication": 1
       |          },
       |          "Number of Partitions": 801,
       |          "Number of Cached Partitions": 1201,
       |          "Memory Size": 1601,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 2001
       |        },
       |        {
       |          "RDD ID": 6,
       |          "Name": "mayor",
-      |          "Callsite": {"Short Form": "6", "Long Form": "802"},
+      |          "Callsite": "6",
       |          "Parent IDs": [1, 4, 7],
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": true,
       |            "Replication": 1
       |          },
       |          "Number of Partitions": 802,
       |          "Number of Cached Partitions": 1202,
       |          "Memory Size": 1602,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 2002
       |        },
       |        {
       |          "RDD ID": 7,
       |          "Name": "mayor",
-      |          "Callsite": {"Short Form": "7", "Long Form": "803"},
+      |          "Callsite": "7",
       |          "Parent IDs": [1, 4, 7],
       |          "Storage Level": {
       |            "Use Disk": true,
       |            "Use Memory": true,
-      |            "Use ExternalBlockStore": false,
       |            "Deserialized": true,
       |            "Replication": 1
       |          },
       |          "Number of Partitions": 803,
       |          "Number of Cached Partitions": 1203,
       |          "Memory Size": 1603,
-      |          "ExternalBlockStore Size": 0,
       |          "Disk Size": 2003
       |        }
       |      ],
@@ -1731,12 +1692,10 @@ class JsonProtocolSuite extends SparkFunSuite {
      |          "Storage Level": {
      |            "Use Disk": true,
      |            "Use Memory": true,
-     |            "Use ExternalBlockStore": false,
      |            "Deserialized": false,
      |            "Replication": 2
      |          },
      |          "Memory Size": 0,
-     |          "ExternalBlockStore Size": 0,
      |          "Disk Size": 0
      |        }
      |      }

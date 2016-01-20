@@ -19,9 +19,9 @@ package org.apache.spark
 
 import java.io.File
 
-import org.apache.spark.util.{SparkConfWithEnv, Utils}
+import org.apache.spark.util.{ResetSystemProperties, SparkConfWithEnv, Utils}
 
-class SecurityManagerSuite extends SparkFunSuite {
+class SecurityManagerSuite extends SparkFunSuite with ResetSystemProperties {
 
   test("set security with conf") {
     val conf = new SparkConf
@@ -181,9 +181,10 @@ class SecurityManagerSuite extends SparkFunSuite {
     "SSL_DHE_RSA_WITH_AES_128_CBC_SHA256")
 
     val securityManager = new SecurityManager(conf)
+    val akkaSSLOptions = securityManager.getSSLOptions("akka")
 
     assert(securityManager.fileServerSSLOptions.enabled === true)
-    assert(securityManager.akkaSSLOptions.enabled === true)
+    assert(akkaSSLOptions.enabled === true)
 
     assert(securityManager.sslSocketFactory.isDefined === true)
     assert(securityManager.hostnameVerifier.isDefined === true)
@@ -198,15 +199,15 @@ class SecurityManagerSuite extends SparkFunSuite {
     assert(securityManager.fileServerSSLOptions.protocol === Some("TLSv1.2"))
     assert(securityManager.fileServerSSLOptions.enabledAlgorithms === expectedAlgorithms)
 
-    assert(securityManager.akkaSSLOptions.trustStore.isDefined === true)
-    assert(securityManager.akkaSSLOptions.trustStore.get.getName === "truststore")
-    assert(securityManager.akkaSSLOptions.keyStore.isDefined === true)
-    assert(securityManager.akkaSSLOptions.keyStore.get.getName === "keystore")
-    assert(securityManager.akkaSSLOptions.trustStorePassword === Some("password"))
-    assert(securityManager.akkaSSLOptions.keyStorePassword === Some("password"))
-    assert(securityManager.akkaSSLOptions.keyPassword === Some("password"))
-    assert(securityManager.akkaSSLOptions.protocol === Some("TLSv1.2"))
-    assert(securityManager.akkaSSLOptions.enabledAlgorithms === expectedAlgorithms)
+    assert(akkaSSLOptions.trustStore.isDefined === true)
+    assert(akkaSSLOptions.trustStore.get.getName === "truststore")
+    assert(akkaSSLOptions.keyStore.isDefined === true)
+    assert(akkaSSLOptions.keyStore.get.getName === "keystore")
+    assert(akkaSSLOptions.trustStorePassword === Some("password"))
+    assert(akkaSSLOptions.keyStorePassword === Some("password"))
+    assert(akkaSSLOptions.keyPassword === Some("password"))
+    assert(akkaSSLOptions.protocol === Some("TLSv1.2"))
+    assert(akkaSSLOptions.enabledAlgorithms === expectedAlgorithms)
   }
 
   test("ssl off setup") {
@@ -218,7 +219,6 @@ class SecurityManagerSuite extends SparkFunSuite {
     val securityManager = new SecurityManager(conf)
 
     assert(securityManager.fileServerSSLOptions.enabled === false)
-    assert(securityManager.akkaSSLOptions.enabled === false)
     assert(securityManager.sslSocketFactory.isDefined === false)
     assert(securityManager.hostnameVerifier.isDefined === false)
   }
