@@ -400,8 +400,9 @@ final class DataFrameWriter[T] private[sql](ds: Dataset[T]) {
   }
 
   private def createTable(tableIdent: TableIdentifier): Unit = {
-    val storage = DataSource.buildStorageFormatFromOptions(extraOptions.toMap)
-    val tableType = if (storage.locationUri.isDefined) {
+    val isFileFormat = DataSource.isFileFormat(source)
+    val storage = DataSource.buildStorageFormatFromOptions(extraOptions.toMap, isFileFormat)
+    val tableType = if (storage.locationUri.isDefined || !isFileFormat) {
       CatalogTableType.EXTERNAL
     } else {
       CatalogTableType.MANAGED

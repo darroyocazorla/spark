@@ -21,6 +21,7 @@ import java.io.File
 
 import org.scalatest.BeforeAndAfterEach
 
+import org.apache.fakesource.FakeExternalSourceOne
 import org.apache.spark.SparkFunSuite
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalog.{Column, Database, Function, Table}
@@ -534,5 +535,17 @@ class CatalogSuite
     forkedSession.sessionState.catalog
       .createTempView("fork_table", Range(1, 2, 3, 4), overrideIfExists = true)
     assert(spark.catalog.listTables().collect().map(_.name).toSet == Set())
+  }
+
+  test("createTable using a non file format datasource should be EXTERNAL") {
+    withTable("t") {
+      spark.catalog.createTable(
+        tableName = "t",
+        source = classOf[FakeExternalSourceOne].getCanonicalName,
+        options = Map("path" -> "fakepath"))
+
+      val table = spark.sessionState.catalog.getTableMetadata(TableIdentifier("t"))
+      assert(table.tableType == CatalogTableType.EXTERNAL)
+    }
   }
 }

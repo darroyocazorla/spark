@@ -583,15 +583,23 @@ object DataSource extends Logging {
   }
 
   /**
-   * When creating a data source table, the `path` option has a special meaning: the table location.
-   * This method extracts the `path` option and treat it as table location to build a
-   * [[CatalogStorageFormat]]. Note that, the `path` option is removed from options after this.
+   * When creating a [[FileFormat]] data source table, the `path` option has a special
+   * meaning: the table location. his method extracts the `path` option and treat it as
+   * table location to build a [[CatalogStorageFormat]].
+   * Note that, the `path` option is removed from options after this.
    */
-  def buildStorageFormatFromOptions(options: Map[String, String]): CatalogStorageFormat = {
-    val path = CaseInsensitiveMap(options).get("path")
-    val optionsWithoutPath = options.filterKeys(_.toLowerCase(Locale.ROOT) != "path")
-    CatalogStorageFormat.empty.copy(
-      locationUri = path.map(CatalogUtils.stringToURI), properties = optionsWithoutPath)
+  def buildStorageFormatFromOptions(
+      options: Map[String, String],
+      isFileFormatDatasource: Boolean = true): CatalogStorageFormat = {
+    if (isFileFormatDatasource) {
+      val path = CaseInsensitiveMap(options).get("path")
+      val optionsWithoutPath = options.filterKeys(_.toLowerCase(Locale.ROOT) != "path")
+      CatalogStorageFormat.empty.copy(
+        locationUri = path.map(CatalogUtils.stringToURI), properties = optionsWithoutPath)
+    } else {
+      CatalogStorageFormat.empty.copy(properties = options)
+    }
+
   }
 
   /**
@@ -617,4 +625,9 @@ object DataSource extends Logging {
     }
     globPath
   }
+
+  /** Given a provider name, return whether the provider is a [[FileFormat]] datasource. */
+  def isFileFormat(provider: String): Boolean =
+    classOf[FileFormat].isAssignableFrom(DataSource.lookupDataSource(provider))
+
 }

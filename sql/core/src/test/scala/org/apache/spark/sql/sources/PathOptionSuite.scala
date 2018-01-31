@@ -20,10 +20,10 @@ package org.apache.spark.sql.sources
 import java.net.URI
 
 import org.apache.hadoop.fs.Path
-
-import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession, SQLContext}
+import org.apache.spark.sql.{DataFrame, SQLContext, SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.catalog.CatalogUtils
+import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.sql.types.{IntegerType, Metadata, MetadataBuilder, StructType}
@@ -53,7 +53,7 @@ class TestOptionsRelation(val options: Map[String, String])(@transient val sessi
 
   override def sqlContext: SQLContext = session.sqlContext
 
-  def pathOption: Option[String] = options.get("path")
+  def pathOption: Option[String] = CaseInsensitiveMap(options).get("path")
 
   // We can't get the relation directly for write path, here we put the path option in schema
   // metadata, so that we can test it later.
@@ -81,7 +81,7 @@ class PathOptionSuite extends DataSourceTest with SharedSQLContext {
     // should exist even path option is not specified when creating table
     withTable("src") {
       sql(s"CREATE TABLE src(i int) USING ${classOf[TestOptionsSource].getCanonicalName}")
-      assert(getPathOption("src").map(makeQualifiedPath) == Some(defaultTablePath("src")))
+      assert(getPathOption("src").isEmpty)
     }
   }
 
@@ -109,9 +109,7 @@ class PathOptionSuite extends DataSourceTest with SharedSQLContext {
            |USING ${classOf[TestOptionsSource].getCanonicalName}
            |AS SELECT 1
           """.stripMargin)
-      assert(
-        makeQualifiedPath(spark.table("src").schema.head.metadata.getString("path")) ==
-        defaultTablePath("src"))
+      assert(!spark.table("src").schema.head.metadata.contains("path"))
     }
   }
 
@@ -129,7 +127,7 @@ class PathOptionSuite extends DataSourceTest with SharedSQLContext {
     withTable("src", "src2") {
       sql(s"CREATE TABLE src(i int) USING ${classOf[TestOptionsSource].getCanonicalName}")
       sql("ALTER TABLE src RENAME TO src2")
-      assert(getPathOption("src2").map(makeQualifiedPath) == Some(defaultTablePath("src2")))
+      assert(getPathOption("src2").isEmpty)
     }
   }
 

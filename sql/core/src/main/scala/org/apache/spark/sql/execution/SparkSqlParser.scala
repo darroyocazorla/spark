@@ -379,7 +379,8 @@ class SparkSqlAstBuilder(conf: SQLConf) extends AstBuilder(conf) {
     val bucketSpec = Option(ctx.bucketSpec()).map(visitBucketSpec)
 
     val location = Option(ctx.locationSpec).map(visitLocationSpec)
-    val storage = DataSource.buildStorageFormatFromOptions(options)
+    val isFileFormat = DataSource.isFileFormat(provider)
+    val storage = DataSource.buildStorageFormatFromOptions(options, isFileFormat)
 
     if (location.isDefined && storage.locationUri.isDefined) {
       throw new ParseException(
@@ -388,7 +389,7 @@ class SparkSqlAstBuilder(conf: SQLConf) extends AstBuilder(conf) {
     }
     val customLocation = storage.locationUri.orElse(location.map(CatalogUtils.stringToURI(_)))
 
-    val tableType = if (customLocation.isDefined) {
+    val tableType = if (customLocation.isDefined || !isFileFormat) {
       CatalogTableType.EXTERNAL
     } else {
       CatalogTableType.MANAGED

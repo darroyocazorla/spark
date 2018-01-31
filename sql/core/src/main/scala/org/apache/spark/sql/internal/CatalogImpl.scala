@@ -335,8 +335,9 @@ class CatalogImpl(sparkSession: SparkSession) extends Catalog {
       schema: StructType,
       options: Map[String, String]): DataFrame = {
     val tableIdent = sparkSession.sessionState.sqlParser.parseTableIdentifier(tableName)
-    val storage = DataSource.buildStorageFormatFromOptions(options)
-    val tableType = if (storage.locationUri.isDefined) {
+    val isFileFormat = DataSource.isFileFormat(source)
+    val storage = DataSource.buildStorageFormatFromOptions(options, isFileFormat)
+    val tableType = if (storage.locationUri.isDefined || !isFileFormat) {
       CatalogTableType.EXTERNAL
     } else {
       CatalogTableType.MANAGED
